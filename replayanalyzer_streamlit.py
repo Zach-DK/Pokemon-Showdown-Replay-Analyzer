@@ -9,23 +9,37 @@ from collections import deque
 
 def parse_who_field(who_field):
     """
-    Given something like "p2a: Volcarona", split it into (slot, nick).
+    Given a string like "p2a: Volcarona", split it into (slot, nick).
+    If no colon is present, return the whole string as slot and an empty nickname.
     """
-    slot, nick = who_field.split(":", 1)
-    return slot.strip(), nick.strip()
+    if ":" in who_field:
+        slot, nick = who_field.split(":", 1)
+        return slot.strip(), nick.strip()
+    else:
+        return who_field.strip(), ""
 
 def normalize_species(s):
     """
-    Remove trailing gender markers (e.g., ", M" or ", F") so that species
-    are printed without them.
+    Remove trailing gender markers (e.g., ", M" or ", F") so that species are printed without them.
     """
     s = s.strip()
     return re.sub(r",[ ]*[MF]$", "", s)
 
+def base_species(s):
+    """
+    Return the 'base' species name (without forme information) from a species string.
+    """
+    s = normalize_species(s)
+    exceptions = {"Porygon-Z", "Ho-Oh"}
+    if s in exceptions:
+        return s
+    if '-' in s:
+        return s.split('-')[0]
+    return s
+
 def key_to_species(unique_key):
     """
-    Given a unique key of the form "p2a (Dragonite, M)", extract and normalize
-    the species portion.
+    Given a unique key of the form "p2a (Dragonite, M)", extract the species portion and normalize it.
     """
     m = re.search(r"\((.*?)\)", unique_key)
     if m:
@@ -48,9 +62,95 @@ def format_stats_table(species_stats_list):
     return rows
 
 # --- Replay Analysis Function ---
-
 def analyze_replay(replayURL):
-    # Get JSON data from the replay
+    # Define explosion moves that should be treated specially.
+    explosion_moves = {"Explosion", "Self Destruct", "Final Gambit", "Misty Explosion"}
+    
+    # Define move_to_status mapping (only used to check last_move effects in status lines)
+    move_to_status = {
+        # Burn moves
+        "Beak Blast": "brn",
+        "Blaze Kick": "brn",
+        "Blazing Torque": "brn",
+        "Blue Flare": "brn",
+        "Burning Bulwark": "brn",
+        "Burning Jealousy": "brn",
+        "Ember": "brn",
+        "Fire Blast": "brn",
+        "Fire Fang": "brn",
+        "Fire Punch": "brn",
+        "Flame Wheel": "brn",
+        "Flamethrower": "brn",
+        "Flare Blitz": "brn",
+        "Fling": "brn",  # Fling can also be psn
+        "Heat Wave": "brn",
+        "Ice Burn": "brn",
+        "Infernal Parade": "brn",
+        "Inferno": "brn",
+        "Lava Plume": "brn",
+        "Matcha Gotcha": "brn",
+        "Psycho Shift": "brn",  # Also appears under poison; context decides.
+        "Pyro Ball": "brn",
+        "Sacred Fire": "brn",
+        "Sandsear Storm": "brn",
+        "Scald": "brn",
+        "Scorching Sands": "brn",
+        "Searing Shot": "brn",
+        "Secret Power": "brn",
+        "Shadow Fire": "brn",
+        "Sizzly Slide": "brn",
+        "Steam Eruption": "brn",
+        "Tri Attack": "brn",
+        "Will-O-Wisp": "brn",
+        
+        # Poison moves
+        "Baneful Bunker": "psn",
+        "Barb Barrage": "psn",
+        "Cross Poison": "psn",
+        "Dire Claw": "psn",
+        "Fling": "psn",  # Fling can also poison
+        "G-Max Befuddle": "psn",
+        "G-Max Malodor": "psn",
+        "G-Max Stun Shock": "psn",
+        "Gunk Shot": "psn",
+        "Malignant Chain": "psn",
+        "Mortal Spin": "psn",
+        "Noxious Torque": "psn",
+        "Poison Fang": "psn",
+        "Poison Gas": "psn",
+        "Poison Jab": "psn",
+        "Poison Powder": "psn",
+        "Poison Sting": "psn",
+        "Poison Tail": "psn",
+        "Psycho Shift": "psn",
+        "Secret Power": "psn",
+        "Shell Side Arm": "psn",
+        "Sludge": "psn",
+        "Sludge Bomb": "psn",
+        "Sludge Wave": "psn",
+        "Smog": "psn",
+        "Toxic": "psn",
+        "Toxic Spikes": "psn",
+        "Toxic Thread": "psn",
+        "Twineedle": "psn",
+        
+        # Paralysis moves
+        "Thunder Wave": "par"
+    }
+    
+    partial_trap_moves = {
+        "Salt Cure", "Bind", "Clamp", "Fire Spin", "G-Max Centiferno",
+        "G-Max Sandblast", "Infestation", "Magma Storm", "Sand Tomb",
+        "Snap Trap", "Thunder Cage", "Whirlpool", "Wrap", "Destiny Bond"
+    }
+    extra_passive = {"Rocky Helmet", "Jaboca Berry", "Rowap Berry", "Rough Skin",
+                     "Spiky Shield", "Sandstorm"}
+
+    last_move_user = None
+    last_move_name = None
+    destiny_bond_queue = deque()
+
+    # --- Fetch Replay Data ---
     url = replayURL + '.json'
     response = requests.get(url)
     if not response.ok:
@@ -61,15 +161,14 @@ def analyze_replay(replayURL):
     except json.JSONDecodeError:
         return "Error: The response was not valid JSON. Check the replay URL."
 
-    # Extract player names
+    # --- Extract Basic Info ---
     p1_name = data["players"][0]
     p2_name = data["players"][1]
-
     log_text = data["log"]
     all_lines = log_text.split("\n")
 
-    # Look for the win line (to get the winner)
-    winner = None
+    # Determine winner
+    winner = "Unknown"
     for line in all_lines:
         if line.startswith("|win|"):
             parts = line.split("|")
@@ -78,18 +177,11 @@ def analyze_replay(replayURL):
             else:
                 winner = parts[1]
             break
-    if winner is None:
-        winner = "Unknown"
 
-    # Remove chat, join, leave lines
-    log_lines = [
-        line for line in all_lines
-        if not line.startswith("|c|")
-        and not line.startswith("|j|")
-        and not line.startswith("|l|")
-    ]
+    # Remove chat, join, leave lines.
+    log_lines = [line for line in all_lines if not (line.startswith("|c|") or line.startswith("|j|") or line.startswith("|l|"))]
 
-    # --- Build Team Rosters from |poke| Lines ---
+    # --- Build Team Rosters ---
     p1_roster = []
     p2_roster = []
     for line in log_lines:
@@ -106,29 +198,26 @@ def analyze_replay(replayURL):
                 if species and species not in p2_roster:
                     p2_roster.append(species)
 
-    # --- Build nickname_map from switch, detailschange, and drag events ---
+    # --- Build nickname_map ---
     nickname_map = {}
     switch_regex = re.compile(r"^\|switch\|(p[12][ab]?)\: (.*?)\|(.*?)(?:\||\,|$)")
     detailschange_regex = re.compile(r"^\|detailschange\|(p[12][ab]?)\: (.*?)\|(.*)$")
     drag_regex = re.compile(r"^\|drag\|(p[12][ab]?)\: (.*?)\|(.*?)(?:\||$)")
-
     for line in log_lines:
         sw = switch_regex.match(line)
         if sw:
             slot, nick, species = sw.group(1), sw.group(2), sw.group(3).strip()
             nickname_map[f"{slot} ({nick})"] = species
-
         dc = detailschange_regex.match(line)
         if dc:
             slot, nick, species = dc.group(1), dc.group(2), dc.group(3).strip()
             nickname_map[f"{slot} ({nick})"] = species
-
         dr = drag_regex.match(line)
         if dr:
             slot, nick, species = dr.group(1), dr.group(2), dr.group(3).strip()
             nickname_map[f"{slot} ({nick})"] = species
 
-    # --- Add Pokémon That Never Enter the Field ---
+    # Add Pokémon that never enter the field
     p1_slots = ['p1a', 'p1b', 'p1c', 'p1d', 'p1e', 'p1f']
     p2_slots = ['p2a', 'p2b', 'p2c', 'p2d', 'p2e', 'p2f']
     for i, species in enumerate(p1_roster):
@@ -139,6 +228,11 @@ def analyze_replay(replayURL):
         key = f"{p2_slots[i]} ({species})"
         if key not in nickname_map:
             nickname_map[key] = species
+
+    # Optional: Bail out if any disallowed Pokémon are present.
+    disallowed = {"Zoroark", "Zoroark-Hisui", "Zorua", "Zorua-Hisui"}
+    if any(normalize_species(species) in disallowed for species in nickname_map.values()):
+        return "There's a Zoroark, this tool will not work"
 
     # --- Split Log into Turns ---
     turns = []
@@ -159,53 +253,27 @@ def analyze_replay(replayURL):
         turns.append((turn_number, current_turn))
     battle_turns = turns[-1][0] if turns else 0
 
-    # Data structures for tracking kills and sources
+    # --- Tracking for Kills, etc. ---
     kills = []  # (inflictor_key, fainted_key, turn, cause_of_death)
-    status_sources = {}  # e.g., {"psn": {victim_key: inflictor_key}, ...}
-    ability_owners = {}  # e.g., {"Sand Stream": "p1a (...)"}
+    status_sources = {}   # e.g., {"psn": {victim_key: inflictor_key}, ...}
+    ability_owners = {}   # e.g., {"Sand Stream": "p1a (...)"}
     hazard_sources = {
         "Stealth Rock": {},
         "Spikes": {},
         "Toxic Spikes": {},
         "Sticky Web": {}
     }
-    move_to_status = {
-        "Will-O-Wisp": "brn",
-        "Toxic": "psn",
-        "Thunder Wave": "par"
-    }
-    partial_trap_moves = {
-        "Salt Cure",
-        "Bind",
-        "Clamp",
-        "Fire Spin",
-        "G-Max Centiferno",
-        "G-Max Sandblast",
-        "Infestation",
-        "Magma Storm",
-        "Sand Tomb",
-        "Snap Trap",
-        "Thunder Cage",
-        "Whirlpool",
-        "Wrap",
-        "Destiny Bond"
-    }
-    # Include Destiny Bond in the "extra passive" set
-    extra_passive = {
-        "Rocky Helmet", "Jaboca Berry", "Rowap Berry", "Rough Skin",
-        "Spiky Shield", "Sandstorm"
-    }
 
     last_move_user = None
     last_move_name = None
 
-    # Use a queue to track multiple Destiny Bond activations
-    destiny_bond_queue = deque()
-
-    # --- Process lines turn by turn ---
+    # --- Process Turns ---
     for tnum, turn_lines in turns:
+        # Clear last-move info at the beginning of each turn.
+        last_move_user = None
+        last_move_name = None
         for line in turn_lines:
-            # (A) Detect abilities
+            # (A) Ability detection
             if line.startswith("|-ability|"):
                 parts = line.split("|")
                 if len(parts) >= 4:
@@ -223,38 +291,21 @@ def analyze_replay(replayURL):
                     move_used = parts[3].strip()
                     target_field = parts[4]
                     att_slot, att_nick = parse_who_field(attacker_field)
-                    attacker_key = f"{att_slot} ({att_nick})"
-                    last_move_user = attacker_key
+                    last_move_user = f"{att_slot} ({att_nick})"
                     last_move_name = move_used
-
-                    # If the move places hazards, note the side targeted
+                    # Process hazard moves.
                     if move_used in hazard_sources:
-                        # e.g., "|move|p1a: Foo|Stealth Rock|p2a: Bar"
-                        target_side = target_field.split(":")[0]
-                        # Typically target_field is like "p2a: Something" -> "p2"
-                        target_side = target_side[:2]
-                        hazard_sources[move_used][target_side] = attacker_key
-
-                    # If the move is a partial-trap move, store that source
+                        target_side = target_field.split(":")[0][:2]
+                        hazard_sources[move_used][target_side] = last_move_user
+                    # Process partial-trap moves.
                     if move_used in partial_trap_moves:
                         tar_slot, tar_nick = parse_who_field(target_field)
                         victim_key = f"{tar_slot} ({tar_nick})"
                         if move_used not in status_sources:
                             status_sources[move_used] = {}
-                        status_sources[move_used][victim_key] = attacker_key
+                        status_sources[move_used][victim_key] = last_move_user
 
-            # (C) Detect Destiny Bond activation
-            # Lines look like: "|-activate|p2a: fast|move: Destiny Bond"
-            if line.startswith("|-activate|") and "move: Destiny Bond" in line:
-                parts = line.split("|")
-                if len(parts) >= 4:
-                    who_field = parts[2]
-                    slot, nick = parse_who_field(who_field)
-                    user_key = f"{slot} ({nick})"
-                    # Enqueue the user who activated DB
-                    destiny_bond_queue.append(user_key)
-
-            # (D) Status lines
+            # (C) Status lines (tracking poison, etc.)
             if line.startswith("|-status|"):
                 parts = line.split("|")
                 if len(parts) >= 4:
@@ -265,120 +316,117 @@ def analyze_replay(replayURL):
                     vic_slot, vic_nick = parse_who_field(victim_field)
                     victim_key = f"{vic_slot} ({vic_nick})"
                     inflictor_key = None
-
-                    # Check [from] or abilities
-                    from_match = re.search(r'\[from\]\s*(p[12][ab]?:\s*[^|]+|ability:\s*[^|]+)', line)
+                    from_match = re.search(r'\[from\]\s*(p[12][ab]?:\s*[^|]+|ability:\s*[^|]+|move:\s*[^|]+)', line)
                     if from_match:
                         from_text = from_match.group(1).strip()
-                        # Could be "p2a: Nick" or "ability: Poison Point"
                         if from_text.startswith("p") and ":" in from_text:
                             s, n = parse_who_field(from_text)
                             inflictor_key = f"{s} ({n})"
+                        elif from_text.startswith("move:"):
+                            inflictor_key = last_move_user
                         elif from_text.startswith("ability:"):
                             ability_name = from_text.replace("ability:", "").strip()
                             inflictor_key = ability_owners.get(ability_name)
-
-                    # If there's no direct from-match, see if last_move_user inflicted a known status move
                     if not inflictor_key and last_move_name in move_to_status:
                         if inflicted_status == move_to_status[last_move_name]:
                             inflictor_key = last_move_user
+                    if inflicted_status == "psn":
+                        if "psn" not in status_sources:
+                            status_sources["psn"] = {}
+                        status_sources["psn"][victim_key] = inflictor_key
 
-                    if inflictor_key:
-                        if inflicted_status not in status_sources:
-                            status_sources[inflicted_status] = {}
-                        status_sources[inflicted_status][victim_key] = inflictor_key
-
-            # (E) Handling the faint lines
+            # (D) Faint lines from damage events
             if line.startswith("|-damage|"):
-                # Example format:
-                # |-damage|p2a: fast|0 fnt
-                # possibly with: [from] item: Life Orb
                 parts = line.split("|")
                 if len(parts) >= 4:
                     hp_part = parts[3].strip()
                     if hp_part.startswith("0 fnt"):
-                        fainted_field = parts[2]
-                        faint_slot, faint_nick = parse_who_field(fainted_field)
-                        fainted_key = f"{faint_slot} ({faint_nick})"
-
-                        # Try to see if there's a cause in [from]
+                        fainted_field = parts[2].strip()
+                        if ":" in fainted_field:
+                            faint_slot, faint_nick = parse_who_field(fainted_field)
+                            fainted_key = f"{faint_slot} ({faint_nick})"
+                        else:
+                            #st.warning(f"Skipping malformed |-damage| line: {line}")
+                            continue
+                        inflictor_key = None
                         cause_match = re.findall(r'\[from\]\s*([^\|]+)', line)
                         if cause_match:
                             cause_of_death = cause_match[0].strip()
                         else:
                             cause_of_death = "Direct Attack"
-
-                        # Standard normalizations
                         if cause_of_death == "tox":
                             cause_of_death = "psn"
                         if "item: Life Orb" in cause_of_death:
                             cause_of_death = "lifeorb"
-                        if "destiny bond" in cause_of_death.lower():
-                            cause_of_death = "Destiny Bond"
-
-                        # Check if cause matches any known "extra_passive" or partial-trap
-                        for effect in extra_passive:
-                            if effect.lower() in cause_of_death.lower() or f"item: {effect}" in cause_of_death:
-                                cause_of_death = effect
-                                break
                         for trap_move in partial_trap_moves:
                             if (trap_move in cause_of_death) or (f"move: {trap_move}" in cause_of_death):
                                 cause_of_death = trap_move
                                 break
-
-                        # Identify the inflictor (the one who gets credit for the kill)
-                        inflictor_key = None
-
-                        # 1) Hazards?
-                        if cause_of_death in hazard_sources:
-                            side = faint_slot[:2]  # e.g. "p2"
-                            inflictor_key = hazard_sources[cause_of_death].get(side)
-
-                        # 2) Status or partial-trap?
-                        elif cause_of_death in status_sources or cause_of_death in partial_trap_moves:
-                            if cause_of_death in status_sources:
-                                inflictor_key = status_sources[cause_of_death].get(fainted_key)
-
-                        # 3) Destiny Bond special handling:
-                        if cause_of_death == "Destiny Bond":
-                            # If multiple Pokémon used DB this turn, we pop from the queue
-                            if destiny_bond_queue:
-                                inflictor_key = destiny_bond_queue.popleft()
+                        # --- Explosion handling ---
+                        if any(expl in cause_of_death for expl in explosion_moves):
+                            for expl in explosion_moves:
+                                if expl in cause_of_death:
+                                    cause_of_death = expl
+                                    break
+                            inflictor_key = None
+                        elif cause_of_death == "Direct Attack" and last_move_name in explosion_moves:
+                            explosion_move = last_move_name
+                            explosion_attacker_slot = last_move_user.split(" ")[0] if last_move_user else None
+                            cause_of_death = explosion_move
+                            if explosion_attacker_slot and faint_slot != explosion_attacker_slot:
+                                inflictor_key = last_move_user
                             else:
-                                # Fallback if for some reason the queue is empty
                                 inflictor_key = None
-
-                        # 4) If still not found, it might be direct or another extra_passive
-                        if not inflictor_key and (
-                            cause_of_death == "Direct Attack"
-                            or cause_of_death in extra_passive
-                        ):
+                        elif cause_of_death == "Direct Attack":
                             inflictor_key = last_move_user
-
-                        # Record the kill
+                        # --- Poison handling ---
+                        if cause_of_death == "psn" and "psn" in status_sources:
+                            source = status_sources["psn"].get(fainted_key)
+                            if source:
+                                inflictor_key = source
+                        # --- End Explosion/Poison handling ---
                         kills.append((inflictor_key, fainted_key, tnum, cause_of_death))
 
-    # Prepare a textual kill feed
+            # (E) Also process faint lines that begin with "|faint|"
+            if line.startswith("|faint|"):
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    fainted_field = parts[1].strip()
+                    if ":" in fainted_field:
+                        faint_slot, faint_nick = parse_who_field(fainted_field)
+                        fainted_key = f"{faint_slot} ({faint_nick})"
+                    else:
+                        #st.warning(f"Skipping malformed |faint| line: {line}")
+                        continue
+                    if last_move_name in explosion_moves:
+                        explosion_move = last_move_name
+                        explosion_attacker_slot = last_move_user.split(" ")[0] if last_move_user else None
+                        cause_of_death = explosion_move
+                        if explosion_attacker_slot and faint_slot != explosion_attacker_slot:
+                            inflictor_key = last_move_user
+                        else:
+                            inflictor_key = None
+                    else:
+                        cause_of_death = "Direct Attack"
+                        inflictor_key = last_move_user
+                    kills.append((inflictor_key, fainted_key, tnum, cause_of_death))
+        # End of turn: Clear last-move info.
+        last_move_name = None
+        last_move_user = None
+
+    # --- Prepare Kill Feed ---
     kill_feed = "==== KILL FEED ====\n"
     for attacker_key, victim_key, turn, cause in kills:
-        victim_species = normalize_species(
-            nickname_map.get(victim_key, key_to_species(victim_key))
-        )
+        victim_species = normalize_species(nickname_map.get(victim_key, key_to_species(victim_key)))
         if attacker_key:
-            attacker_species = normalize_species(
-                nickname_map.get(attacker_key, key_to_species(attacker_key))
-            )
-            kill_feed += (
-                f"Turn {turn}: {victim_species} fainted from {cause} "
-                f"inflicted by {attacker_species}.\n"
-            )
+            attacker_species = normalize_species(nickname_map.get(attacker_key, key_to_species(attacker_key)))
+            kill_feed += f"Turn {turn}: {victim_species} fainted from {cause} inflicted by {attacker_species}.\n"
         else:
             kill_feed += f"Turn {turn}: {victim_species} fainted from {cause}.\n"
-
     battle_info = f"\nBattle lasted {battle_turns} turns.\nWinner: {winner}.\n"
     final_output = kill_feed + battle_info
 
-    # --- Build Stats ---
+    # --- Build Final Stats ---
     stats = {}
     for unique_key, species in nickname_map.items():
         stats[unique_key] = {
@@ -388,36 +436,23 @@ def analyze_replay(replayURL):
             "direct_deaths": 0,
             "passive_deaths": 0
         }
-
-    # Which effects count as passive kills (vs direct kills)
-    passive_set = {
-        "Stealth Rock", "Spikes", "Toxic Spikes", "Sticky Web",
-        "brn", "psn", "Salt Cure", "lifeorb"
-    } | partial_trap_moves | extra_passive
-
+    passive_causes = {"Stealth Rock", "Spikes", "Toxic Spikes", "Sticky Web",
+                      "brn", "psn", "Salt Cure", "lifeorb"} | explosion_moves | partial_trap_moves | extra_passive
     for attacker_key, victim_key, turn, cause in kills:
-        kill_type = "passive" if cause in passive_set else "direct"
-
-        # Ensure the attacker is in stats
+        kill_type = "passive" if cause in passive_causes else "direct"
         if attacker_key:
             if attacker_key not in stats:
                 stats[attacker_key] = {
-                    "species": normalize_species(
-                        nickname_map.get(attacker_key, key_to_species(attacker_key))
-                    ),
+                    "species": normalize_species(nickname_map.get(attacker_key, key_to_species(attacker_key))),
                     "direct_kills": 0,
                     "passive_kills": 0,
                     "direct_deaths": 0,
                     "passive_deaths": 0
                 }
             stats[attacker_key][f"{kill_type}_kills"] += 1
-
-        # Ensure the victim is in stats
         if victim_key not in stats:
             stats[victim_key] = {
-                "species": normalize_species(
-                    nickname_map.get(victim_key, key_to_species(victim_key))
-                ),
+                "species": normalize_species(nickname_map.get(victim_key, key_to_species(victim_key))),
                 "direct_kills": 0,
                 "passive_kills": 0,
                 "direct_deaths": 0,
@@ -425,21 +460,15 @@ def analyze_replay(replayURL):
             }
         stats[victim_key][f"{kill_type}_deaths"] += 1
 
-    # Aggregate by team (p1 or p2) and species
+    # --- Aggregate Stats by Team (Full Species) ---
     species_stats = {}
     for unique_key, record in stats.items():
-        # Extract "p1" or "p2" from the slot
-        team = unique_key.split("(")[0].strip()[:2]  # e.g. "p2"
+        team = unique_key.split("(")[0].strip()[:2]
         species = record["species"]
         key = (team, species)
         if key not in species_stats:
-            species_stats[key] = {
-                "species": species,
-                "direct_kills": 0,
-                "passive_kills": 0,
-                "direct_deaths": 0,
-                "passive_deaths": 0
-            }
+            species_stats[key] = {"species": species, "direct_kills": 0, "passive_kills": 0,
+                                    "direct_deaths": 0, "passive_deaths": 0}
         species_stats[key]["direct_kills"] += record["direct_kills"]
         species_stats[key]["passive_kills"] += record["passive_kills"]
         species_stats[key]["direct_deaths"] += record["direct_deaths"]
@@ -463,31 +492,24 @@ def analyze_replay(replayURL):
 
     return final_output, p1_table, p2_table, p1_name, p2_name
 
-# --- Streamlit App ---
-
-st.title("Pokémon Showdown Replay Analyzer")
-st.markdown("Enter a Pokémon Showdown replay URL (without the trailing `.json`) below and click **Analyze**.")
-
-replay_url = st.text_input("Replay URL", "")
-
-if st.button("Analyze"):
-    if replay_url.strip() == "":
-        st.error("Please enter a valid replay URL.")
-    else:
-        result = analyze_replay(replay_url.strip())
+# --- Streamlit App Interface ---
+def main():
+    st.title("Pokémon Showdown Replay Analyzer")
+    st.markdown("Enter a Pokémon Showdown replay URL (without the trailing `.json`) below and click **Analyze**.")
+    replay_url = st.text_input("Replay URL", "")
+    if st.button("Analyze") and replay_url:
+        with st.spinner("Analyzing replay..."):
+            result = analyze_replay(replay_url.strip())
         if isinstance(result, str):
-            # If we got a string back, it's an error message
             st.error(result)
         else:
-            # Otherwise, unpack the results
             final_output, p1_table, p2_table, p1_name, p2_name = result
-
-            # Show the battle summary
             st.subheader("Battle Summary")
             st.text(final_output)
-
-            # Show stats for each team
             st.subheader(f"{p1_name}'s Stats (Team Order)")
             st.table(p1_table)
             st.subheader(f"{p2_name}'s Stats (Team Order)")
             st.table(p2_table)
+
+if __name__ == "__main__":
+    main()
